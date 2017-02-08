@@ -1,0 +1,377 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, cache=FALSE, echo=FALSE, global.par=TRUE}
+library("RColorBrewer")    # brewer.pal
+library("knitr")           # opts_chunk
+# terminal output
+options(width = 100)
+# color palette
+palette(brewer.pal(6, "Set1"))
+# code chunk options
+opts_chunk$set(cache=TRUE, echo=F, fig.align="center", comment=NA,highlight=FALSE, tidy=FALSE, warning=FALSE, message=FALSE)
+setwd("/Users/wonikJang/Desktop/text_mining")
+```
+
+Text Mining: Topic Models, Sentiment Analysis
+==============================
+*Wonik Jang*
+
+ - Topic Models [Wikipedia files] with POS(Part of Speech) tagging 
+ - Matrix decomposition & Segmeneting text [masc from the American National Corpus]
+ - Sentiment Analysis [First GOP Debate Twitter Sentiment from Kaggle]
+ 
+```{r}
+library("mallet")
+library("coreNLP")
+library("dplyr")
+library("jsonlite")
+library("Matrix")
+library("NLP")
+library("openNLP")
+library("tm")
+```
+
+# Topic Models
+
+ - Data: wikipedia pages for 179 philosophers from Taylor Arnold and Lauren Tilton's book
+ 
+```{r}
+wikiFiles <- dir("/Users/wonikJang/Desktop/text_mining/data/ch10/wiki_annotations", full.names=TRUE)
+wikiNames <- gsub("\\.Rds", "", basename(wikiFiles))
+```
+
+```{r}
+dateSet <- rep(0, length(wikiFiles))
+for (j in seq_along(wikiFiles)) {
+    anno <- readRDS(wikiFiles[j])
+    tx <- getToken(anno)$Timex
+    tx <- substr(tx[!is.na(tx)], 1, 4)
+    suppressWarnings({
+        tx <- as.numeric(tx)
+    })
+    tx <- tx[!is.na(tx)]
+    dateSet[j] <- tx[1]
+}
+```
+
+```{r}
+wikiFiles <- wikiFiles[order(dateSet)]
+wikiNames <- wikiNames[order(dateSet)]
+```
+
+```{r }
+bagOfWords <- rep("", length(wikiFiles))
+for (j in seq_along(wikiFiles)) {
+    anno <- readRDS(wikiFiles[j])
+    token <- coreNLP::getToken(anno)
+    theseLemma <- token$lemma[token$POS %in% c("NNS", "NN")]
+    bagOfWords[j] <- paste(theseLemma, collapse=" ")
+}
+```
+
+```{r}
+tf <- tempfile()
+writeLines(c(letters, LETTERS), tf)
+```
+
+```{r}
+instance <- mallet.import(id.array=wikiNames, text.array=bagOfWords, stoplist.file=tf)
+tm <- MalletLDA(num.topics=9)
+tm$loadDocuments(instance)
+tm$setAlphaOptimization(20, 50)
+tm$train(200)
+tm$maximize(10)
+```
+ 
+ - Reuslts: After fitting the model I can now pull out the topics, the words, and the vocabulary. The words with the highest activations for the topics:
+
+```{r}
+topics <- mallet.doc.topics(tm, smoothed=TRUE, normalized=TRUE)
+words <- mallet.topic.words(tm, smoothed=TRUE, normalized=TRUE)
+vocab <- tm$getVocabulary()
+```
+
+
+```{r}
+tm <- readRDS("/Users/wonikJang/Desktop/Jang/NYU/Stern_2nd/social_data/5th/humanitiesDataInR/data/ch10/tm.Rds")
+topics <- tm$topics
+words <- tm$words
+vocab <- tm$vocab
+#t(apply(words, 1, function(v) vocab[order(v, decreasing=TRUE)[1:5]]))
+```
+
+```{r}
+topicNames <- c("politics", "biography", "social-science", "existentialism",
+                "philosophy", "logic", "poetry", "culture", "language")
+```
+
+```{r}
+index <- order(apply(words, 2, max), decreasing=TRUE)[1:50]
+set <- unique(as.character(apply(words, 1, function(v)
+                                 vocab[order(v, decreasing=TRUE)][1:5])))
+index <- match(set, vocab)
+mat <- round(t(words[,index]), 3)
+mat <- mat / max(mat)
+
+plot(0, 0, col="white", t="n", axes=FALSE, xlab="", ylab="",
+     ylim=c(-1, nrow(mat)), xlim=c(-2,ncol(mat)))
+for (i in seq_len(nrow(mat))) {
+    lines(x=c(1,ncol(mat)), y=c(i,i))
+}
+for (i in seq_len(ncol(mat))) {
+    lines(x=c(i,i), y=c(1,nrow(mat)))
+}
+points(col(mat), nrow(mat) - row(mat) + 1, pch=19,
+       cex=mat*3, col=rainbow(ncol(mat), alpha=0.33)[col(mat)])
+text(0.5, nrow(mat):1, vocab[index], adj=c(1,0.5), cex=0.5)
+text(1:ncol(mat), -0.75, topicNames, adj=c(0.5,0), cex=0.5, srt=45)
+```
+
+ - Top 5 words in each of the 9 topics:
+```{r}
+t(apply(words, 1, function(v) vocab[order(v, decreasing=TRUE)[1:5]]))
+```
+
+#### Feature selection by POS-tagging
+
+The below code shows how to filter the POS-tagged and lemmatized corpus. For each document, I build a long text string containing all of the selected words, separated by spaces.
+
+ - Code segment:
+ 
+```{r, echo=T}
+bagOfWords <- rep("", length(wikiFiles))
+for (j in seq_along(wikiFiles)) {
+    anno <- readRDS(wikiFiles[j])
+    token <- coreNLP::getToken(anno)
+    theseLemma <- token$lemma[token$POS %in% c("NNS", "NN")]
+    bagOfWords[j] <- paste(theseLemma, collapse=" ")
+}
+```
+
+
+# Matrix decompositions & Segmenting text
+```{r}
+library("dplyr")
+library("jsonlite")
+library("coreNLP")
+library("openNLP")
+library("NLP")
+library("jsonlite")
+library("Matrix")
+library("rARPACK")
+library("tm")
+```
+
+ - Data: masc from Manually Annotated Sub-Corpus (MASC) from the American National Corpus
+
+```{r}
+masc <- jsonlite::stream_in(file("anc-masc.json"), verbose=FALSE)   # raw text
+```
+ 
+  Construct all unigram and bigram to account for collocations 
+  
+ - Code segement: 
+```{r, echo=T}
+BigramTokenizer <- function(x) {unlist(lapply(NLP::ngrams(NLP::words(x), 2), paste, collapse = " "),
+                                       use.names = FALSE) }
+
+corpus <- VCorpus(VectorSource(masc$text))
+control <- list(tolower = TRUE, removePunctuation = TRUE, removeNumbers = TRUE, wordLengths=c(1, Inf))
+
+dtm <- DocumentTermMatrix(corpus, control=c(control))
+unigram <- sparseMatrix(dtm$i, dtm$j, x = dtm$v, dim=dim(dtm),dimnames=dimnames(dtm))
+
+dtm2 <- DocumentTermMatrix(corpus, control=c(control, tokenize = BigramTokenizer))
+bigram <- sparseMatrix(dtm2$i, dtm2$j, x = dtm2$v, dim=dim(dtm2), dimnames=dimnames(dtm2))
+```
+
+The unigram and bigram
+----------------------
+
+ Based on unigram and bigram, I will measure the collocation possibility and print top 10 bigrams where n1,n2,n12 are used for hypothesis testing.
+
+```{r}
+ug <- colnames(unigram)
+bg <- colnames(bigram)
+chisq <- numeric(length(bg))
+n12 <- colSums(bigram)
+w1 <- numeric(length(bg))
+w2 <- numeric(length(bg))
+
+words <- strsplit(bg, " ")
+words <- lapply(words, function(w) if (length(w) == 2) w else c(NA, NA))
+
+w <- matrix(match(unlist(words), colnames(unigram)), ncol=2, byrow=TRUE)
+
+ok <- !is.na(w[,1]) & !is.na(w[,2])
+n1 <- rep(NA, length(bg))
+n2 <- rep(NA, length(bg))
+n1[ok] <- colSums(unigram)[w[ok,1]]
+n2[ok] <- colSums(unigram)[w[ok,2]]
+n <- sum(unigram)
+
+colloc <- data_frame(bigram=bg, n1, n2, n12)
+
+colloc$chisq <- with(colloc, {
+    # null hypothesis: P(w2|w1) = P(w2|-w1)
+    p = n2 / n
+    dev0 <- -2 * (dbinom(n12, n1, p, log=TRUE)
+                  + dbinom(n2 - n12, n - n1, p, log=TRUE))
+
+    # alt hypothesis: P(w2|w1) > P(w2|-w1)
+    p1 <- n12/n1
+    p2 <- (n2 - n12)/(n - n1)
+    dev1 <- -2 * (dbinom(n12, n1, p1, log=TRUE)
+                  + dbinom(n2 - n12, n - n1, p2, log=TRUE))
+
+    ifelse(p1 <= p2, 0, dev0 - dev1)
+})
+
+colloc$pval <- pchisq(colloc$chisq, df=1, lower.tail = FALSE)
+```
+
+```{r}
+print(n=10, colloc %>% arrange(desc(chisq)))
+```
+
+ Rather than computing the enitre SVD, I compute the top 10 singular values and vectors for unigram using rARPACK package. To check how much dispersion is explained by each component, look at the squares of the singular values:
+With 10 components, I can explain 95% of the variability in the data. The original data matrix has the dimensions
+
+```{r,echo=T}
+dim(dtm)
+```
+
+```{r}
+dtm_svd <- svds(unigram, 10)
+```
+
+```{r}
+d <- dtm_svd$d
+# plot(d^2)
+ (disp_tot <- sum(dtm^2))
+plot(cumsum(d^2) / disp_tot)
+
+```
+
+Document Clustering 
+-------------------
+
+ - K-means clustering  
+```{r}
+kcluster <- kmeans(dtm_svd$u %*% diag(dtm_svd$d), 3, nstart=10)
+table(masc$class, kcluster$cluster)
+```
+
+ After Subseting the orgiginal data labed with jokes, journal, and debate-transcript, I display the scores for the first two factors for all 392 abstracts, colored by document class.
+```{r}
+# table(masc$class)
+masc1<-masc
+selected = c('jokes','journal','debate-transcript')
+masc2<-masc1[masc1$class %in% selected,]
+
+x <- dtm_svd$u[,1] * dtm_svd$d[1]
+y <- dtm_svd$u[,2] * dtm_svd$d[2]
+plot(x, y, col=as.integer(factor(masc2$class)))
+```
+
+# Sentiment Analysis 
+
+ - Data: tweets from the First GOP Debate 
+ 
+ Three different methods will be used: 1) Naive-Bayes 2)Dictionary method 3)Equl-weighted Dictionary method and make "neutral" as the reference class. Data pre-processing by VCorpus, DTM(Document Term Matrix), and sparseMatrix are used. I will use a random sample of 80% of the dataset for
+training, and the remaining 20% for testing.  
+ 
+```{r}
+library("LiblineaR")
+library("Matrix")
+library("nnet") 
+library("tm")
+```
+
+```{r}
+tweet <- read.csv("GOP_REL_ONLY.csv")
+tweet$text <- as.character(tweet$text) 
+tweet$sentiment <- relevel(tweet$sentiment, ref="Neutral")
+# summary(tweet)
+```
+
+```{r}
+corpus <- VCorpus(VectorSource(tweet$text))
+control <- list(tolower = TRUE, removePunctuation = TRUE,
+                removeNumbers = TRUE, wordLengths=c(1, Inf))
+dtm <- DocumentTermMatrix(corpus, control=control)
+dtm <- sparseMatrix(dtm$i, dtm$j, x = dtm$v, dim=dim(dtm),
+                     dimnames=dimnames(dtm))
+```
+
+```{r}
+train_ix <- sample(nrow(dtm), floor(0.8 * nrow(dtm)))
+train <- logical(nrow(dtm))
+train[train_ix] <- TRUE
+test <- !train
+```
+
+
+Naive Bayes Method
+------------------
+I just predict the same sentiment probabilities for all tweets. We learn these probabilities from the training data. We can do this by fitting a multinomial logit model with no covariates:
+
+```{r}
+(nb <- multinom(sentiment ~ 1, tweet, subset=train))
+```
+
+```{r,echo=T}
+predict(nb, newdata=data.frame(row.names=1), "probs")
+```
+
+Dictionary Method
+-----------------
+By using the positive and negative words from Bing Liu's list of positive and negative sentiment words, I form vectors with weights for the positive and negative words.
+
+```{r}
+pos_words <- scan("positive-words.txt", character(), comment.char=";")
+neg_words <- scan("negative-words.txt", character(), comment.char=";")
+```
+
+```{r}
+vocab <- colnames(dtm)
+nvocab <- length(vocab)
+pos_wt <- numeric(nvocab)
+neg_wt <- numeric(nvocab)
+neg_wt[match(neg_words, vocab, 0)] <- 1
+```
+
+```{r}
+tweet$pos_count <- as.numeric(dtm %*% pos_wt)
+tweet$neg_count <- as.numeric(dtm %*% neg_wt)
+```
+
+```{r}
+#  weights on these features using a multinomial logistic model:
+(dict <- multinom(sentiment ~ pos_count + neg_count, tweet, subset=train))
+```
+
+Prediction for different number of negative words 
+```{r}
+# both types of words
+predict(dict, newdata=data.frame(pos_count=10, neg_count=1), "probs")
+predict(dict, newdata=data.frame(pos_count=10, neg_count=5), "probs")
+```
+
+Equal-Weighted Dictionary Method
+--------------------------------
+
+For a simpler predictor, I can force the coefficients on "pos_count"" and
+"neg_count"" to have the same absolute value using the following method:
+
+```{r}
+(dict_eq <- multinom(sentiment ~ I(pos_count - neg_count), tweet, subset=train))
+```
+
+
+
